@@ -31,7 +31,10 @@ use nom::sequence::tuple;
 use nom::AsChar;
 use nom::Finish;
 use nom::IResult;
+use nom::InputTakeAtPosition;
+use num_traits::Float;
 use num_traits::Num;
+use num_traits::ParseFloatError;
 use remain::sorted;
 use serde::de;
 use serde::Deserialize;
@@ -126,50 +129,7 @@ fn any_separator(s: &str) -> IResult<&str, Option<char>> {
     }
 }
 
-/// Nom parser for valid strings.
-///
-/// A string can be quoted (using single or double quotes) or not. If it is not quoted, the string
-/// is assumed to continue until the next ',', '[', or ']' character. If it is escaped, it continues
-/// until the next non-escaped quote.
-///
-/// The returned value is a slice into the current input if no characters to unescape were met,
-/// or a fully owned string if we had to unescape some characters.
-fn any_string(s: &str) -> IResult<&str, Cow<str>> {
-    // Double-quoted strings may escape " and \ characters. Since escaped strings are modified,
-    // we need to return an owned `String` instead of just a slice in the input string.
-    let double_quoted = delimited(
-        char('"'),
-        alt((
-            map(
-                escaped_transform(
-                    none_of(r#"\""#),
-                    '\\',
-                    alt((value("\"", char('"')), value("\\", char('\\')))),
-                ),
-                Cow::Owned,
-            ),
-            map(tag(""), Cow::Borrowed),
-        )),
-        char('"'),
-    );
-
-    // Single-quoted strings do not escape characters.
-    let single_quoted = map(
-        delimited(char('\''), alt((is_not(r#"'"#), tag(""))), char('\'')),
-        Cow::Borrowed,
-    );
-
-    // Unquoted strings end with the next comma or bracket and may not contain a quote or bracket
-    // character or be empty.
-    let unquoted = map(
-        take_while1(|c: char| c != ',' && c != '"' && c != '\'' && c != '[' && c != ']'),
-        Cow::Borrowed,
-    );
-
-    alt((double_quoted, single_quoted, unquoted))(s)
-}
-
-/// Nom parser for valid positive of negative numbers.
+/// Nom parser for valid positive of negative float point numbers.
 ///
 /// Hexadecimal, octal, and binary values can be specified with the `0x`, `0o` and `0b` prefixes.
 fn any_number<T>(s: &str) -> IResult<&str, T>
@@ -219,6 +179,92 @@ where
 
     map_res(parse_number, |(num_string, radix)| {
         T::from_str_radix(&num_string, radix)
+    })(s)
+}
+
+/// Nom parser for valid strings.
+///
+/// A string can be quoted (using single or double quotes) or not. If it is not quoted, the string
+/// is assumed to continue until the next ',', '[', or ']' character. If it is escaped, it continues
+/// until the next non-escaped quote.
+///
+/// The returned value is a slice into the current input if no characters to unescape were met,
+/// or a fully owned string if we had to unescape some characters.
+fn any_string(s: &str) -> IResult<&str, Cow<str>> {
+    // Double-quoted strings may escape " and \ characters. Since escaped strings are modified,
+    // we need to return an owned `String` instead of just a slice in the input string.
+    let double_quoted = delimited(
+        char('"'),
+        alt((
+            map(
+                escaped_transform(
+                    none_of(r#"\""#),
+                    '\\',
+                    alt((value("\"", char('"')), value("\\", char('\\')))),
+                ),
+                Cow::Owned,
+            ),
+            map(tag(""), Cow::Borrowed),
+        )),
+        char('"'),
+    );
+
+    // Single-quoted strings do not escape characters.
+    let single_quoted = map(
+        delimited(char('\''), alt((is_not(r#"'"#), tag(""))), char('\'')),
+        Cow::Borrowed,
+    );
+
+    // Unquoted strings end with the next comma or bracket and may not contain a quote or bracket
+    // character or be empty.
+    let unquoted = map(
+        take_while1(|c: char| c != ',' && c != '"' && c != '\'' && c != '[' && c != ']'),
+        Cow::Borrowed,
+    );
+
+    alt((double_quoted, single_quoted, unquoted))(s)
+}
+
+/// Nom parser for valid float point numbers.
+fn any_float<T>(s: &str) -> IResult<&str, T>
+where
+    T: Float<FromStrRadixErr = ParseFloatError>,
+{
+    // Parses the number input and returns a tuple containing the number itself (with its sign).
+    //
+    // We move this non-generic part into its own function so it doesn't get monomorphized, which
+    // would increase the binary size more than needed.
+    fn parse_float(s: &str) -> IResult<&str, (bool, &str)> {
+        // Recognizes the sign prefix.
+        let sign = char('-');
+
+        fn alphanumeric_and_dot1<T, E: nom::error::ParseError<T>>(input: T) -> IResult<T, T, E>
+        where
+            T: InputTakeAtPosition,
+            <T as InputTakeAtPosition>::Item: AsChar,
+        {
+            input.split_at_position1_complete(
+                |item| !matches!(item.as_char(), '.' | '0'..='9'),
+                nom::error::ErrorKind::AlphaNumeric,
+            )
+        }
+
+        // Recognizes the trailing separator but do not consume it.
+        let separator = peek(any_separator);
+
+        // Chain of parsers: sign (optional), then sequence of numerical characters or dots.
+        //
+        // We accept the numerical characters and with any count of dots. If the input is
+        // not valid, we will get an error when parsing the number.
+        map(
+            tuple((opt(sign), alphanumeric_and_dot1, separator)),
+            |(sign, number, _)| (sign.map(|c| c == '-').unwrap_or(false), number),
+        )(s)
+    }
+
+    map_res(parse_float, |(neg, number)| {
+        let number = T::from_str_radix(&number, 10);
+        number.map(|number| if neg { -number } else { number })
     })(s)
 }
 
@@ -373,6 +419,19 @@ impl<'de> KeyValueDeserializer<'de> {
         T: Num<FromStrRadixErr = ParseIntError>,
     {
         let (remainder, val) = any_number(self.input)
+            .finish()
+            .map_err(|_| self.error_here(ErrorKind::InvalidNumber))?;
+
+        self.input = remainder;
+        Ok(val)
+    }
+
+    /// Attempt to parse a float point number.
+    pub fn parse_float<T>(&mut self) -> Result<T>
+    where
+        T: Float<FromStrRadixErr = ParseFloatError>,
+    {
+        let (remainder, val) = any_float(self.input)
             .finish()
             .map_err(|_| self.error_here(ErrorKind::InvalidNumber))?;
 
@@ -671,18 +730,18 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut KeyValueDeserializer<'de> {
         visitor.visit_u64(self.parse_number()?)
     }
 
-    fn deserialize_f32<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value>
     where
         V: serde::de::Visitor<'de>,
     {
-        unimplemented!()
+        visitor.visit_f64(self.parse_float()?)
     }
 
-    fn deserialize_f64<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value>
     where
         V: serde::de::Visitor<'de>,
     {
-        unimplemented!()
+        visitor.visit_f64(self.parse_float()?)
     }
 
     fn deserialize_char<V>(self, visitor: V) -> Result<V::Value>
