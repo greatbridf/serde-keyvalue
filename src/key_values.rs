@@ -107,7 +107,7 @@ type Result<T> = std::result::Result<T, ParseError>;
 
 /// Returns `true` if `c` is a valid separator character.
 fn is_separator(c: Option<char>) -> bool {
-    matches!(c, Some(',') | Some(']') | None)
+    matches!(c, Some(' ') | Some(',') | Some(']') | None)
 }
 
 /// Nom parser for valid separators.
@@ -218,7 +218,9 @@ fn any_string(s: &str) -> IResult<&str, Cow<str>> {
     // Unquoted strings end with the next comma or bracket and may not contain a quote or bracket
     // character or be empty.
     let unquoted = map(
-        take_while1(|c: char| c != ',' && c != '"' && c != '\'' && c != '[' && c != ']'),
+        take_while1(|c: char| {
+            c != ' ' && c != ',' && c != '"' && c != '\'' && c != '[' && c != ']'
+        }),
         Cow::Borrowed,
     );
 
@@ -358,7 +360,7 @@ impl<'de> KeyValueDeserializer<'de> {
     fn confirm_separator(&mut self) -> Result<()> {
         // We must have a comma or end of input after a value.
         match self.peek_char() {
-            Some(',') => {
+            Some(',') | Some(' ') => {
                 let _ = self.next_char();
                 Ok(())
             }
