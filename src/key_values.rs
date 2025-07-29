@@ -272,7 +272,10 @@ where
 
 /// Nom parser for booleans.
 fn any_bool(s: &str) -> IResult<&str, bool> {
-    let mut boolean = alt((value(true, tag("true")), value(false, tag("false"))));
+    let mut boolean = alt((
+        value(true, alt((tag("true"), tag("True")))),
+        value(false, alt((tag("false"), tag("False")))),
+    ));
 
     boolean(s)
 }
