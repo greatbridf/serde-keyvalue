@@ -345,6 +345,7 @@
 #![deny(missing_docs)]
 
 mod key_values;
+mod serializer;
 
 #[cfg(feature = "argh_derive")]
 pub use argh;
@@ -354,3 +355,5 @@ pub use key_values::KeyValueDeserializer;
 pub use key_values::ParseError;
 #[cfg(feature = "argh_derive")]
 pub use serde_keyvalue_derive::FromKeyValues;
+
+pub use serializer::KeyValueSerializer;
